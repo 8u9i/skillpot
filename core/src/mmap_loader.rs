@@ -100,11 +100,26 @@ impl AxonBuilder {
         self
     }
 
-    pub fn add_tensor(mut self, name: &str, data: Vec<u8>, dtype: DType, shape: &[u64]) -> Self {
+    pub fn add_tensor(self, name: &str, data: Vec<u8>, dtype: DType, shape: &[u64]) -> Self {
         let expected = shape.iter().product::<u64>() as usize * dtype.size_in_bytes();
         assert_eq!(data.len(), expected, "Tensor data size mismatch for {name}");
+        self.add_tensor_unchecked(name, data, dtype, shape)
+    }
+
+    pub fn add_tensor_unchecked(
+        mut self,
+        name: &str,
+        data: Vec<u8>,
+        dtype: DType,
+        shape: &[u64],
+    ) -> Self {
         self.tensor_data
             .push((name.to_string(), data, dtype, shape.to_vec()));
+        self
+    }
+
+    pub fn metadata(mut self, key: &str, value: serde_json::Value) -> Self {
+        self.manifest.hyperparameters.insert(key.to_string(), value);
         self
     }
 

@@ -66,6 +66,54 @@ fn write_manifest(path: &Path) {
     fs::write(path, manifest).expect("write manifest");
 }
 
+fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_gguf_string(bytes: &mut Vec<u8>, value: &str) {
+    push_u64(bytes, value.len() as u64);
+    bytes.extend_from_slice(value.as_bytes());
+}
+
+fn write_tiny_gguf(path: &Path) {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"GGUF");
+    push_u32(&mut bytes, 3);
+    push_u64(&mut bytes, 1); // tensor count
+    push_u64(&mut bytes, 2); // metadata kv count
+
+    push_gguf_string(&mut bytes, "general.name");
+    push_u32(&mut bytes, 8); // string
+    push_gguf_string(&mut bytes, "TinyGGUF");
+
+    push_gguf_string(&mut bytes, "general.architecture");
+    push_u32(&mut bytes, 8); // string
+    push_gguf_string(&mut bytes, "test");
+
+    push_gguf_string(&mut bytes, "matrix");
+    push_u32(&mut bytes, 2); // rank
+    push_u64(&mut bytes, 2);
+    push_u64(&mut bytes, 2);
+    push_u32(&mut bytes, 0); // GGML_TYPE_F32
+    push_u64(&mut bytes, 0); // tensor offset relative to data section
+
+    while bytes.len() % 32 != 0 {
+        bytes.push(0);
+    }
+    bytes.extend_from_slice(&[
+        0, 0, 128, 63, // 1.0
+        0, 0, 0, 64, // 2.0
+        0, 0, 64, 64, // 3.0
+        0, 0, 128, 64, // 4.0
+    ]);
+
+    fs::write(path, bytes).expect("write tiny gguf");
+}
+
 #[test]
 fn pack_validate_list_extract_and_runtime_inspect() {
     let dir = test_workspace("happy_path");
@@ -228,6 +276,39 @@ fn missing_tensor_reports_clean_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error: tensor 'does_not_exist' not found"));
     assert!(!stderr.contains("panicked at"));
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn import_tiny_gguf_then_inspect_with_axon() {
+    let dir = test_workspace("gguf_import");
+    let gguf = dir.join("tiny.gguf");
+    let axon = dir.join("tiny.axon");
+    write_tiny_gguf(&gguf);
+
+    assert_success(
+        run(&[
+            "import-gguf",
+            &path_string(&gguf),
+            "--output",
+            &path_string(&axon),
+        ]),
+        "import-gguf",
+    );
+
+    let inspect = run(&["inspect", &path_string(&axon)]);
+    assert_success(inspect, "inspect imported gguf");
+    let list = run(&["list", &path_string(&axon), "--verbose"]);
+    assert_success(list, "list imported gguf");
+    assert_success(
+        run(&["validate", &path_string(&axon)]),
+        "validate imported gguf",
+    );
+    assert_success(
+        run(&["runtime", "tensor", &path_string(&axon), "matrix"]),
+        "runtime tensor imported gguf",
+    );
 
     fs::remove_dir_all(&dir).ok();
 }

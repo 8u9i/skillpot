@@ -204,8 +204,25 @@ axon unpack      Extract all tensors to .npy or .bin files
 axon pack        Pack tensors from a manifest and data directory
 axon convert     Export manifest as JSON
 axon bench       Benchmark load/index performance
+axon import-gguf Import a GGUF model into .axon format
 axon runtime     Runtime subcommands: inspect, tensor, slice, stats, bench
 ```
+
+## Ollama and GGUF
+
+Ollama models are commonly stored as GGUF blobs. Axon can import GGUF v2/v3
+files into `.axon` so you can inspect, validate, checksum, and partially access
+their tensor bytes with Axon tooling:
+
+```bash
+axon import-gguf model.gguf --output model.axon
+axon inspect model.axon
+axon runtime tensor model.axon token_embd.weight
+```
+
+This importer preserves GGUF tensor byte ranges and metadata for Axon workflows.
+It does not dequantize tensors or make `.axon` directly runnable by Ollama; use
+Ollama's native GGUF import path when you want to run the model in Ollama.
 
 ## Documentation
 

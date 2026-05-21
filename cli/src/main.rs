@@ -32,6 +32,8 @@ enum Commands {
     List(ListArgs),
     Extract(ExtractArgs),
     Create(CreateArgs),
+    /// Import a GGUF model into Axon format
+    ImportGguf(ImportGgufArgs),
     #[command(subcommand)]
     Runtime(RuntimeCommands),
 }
@@ -126,6 +128,13 @@ struct CreateArgs {
 }
 
 #[derive(Args)]
+struct ImportGgufArgs {
+    input: PathBuf,
+    #[arg(short, long)]
+    output: PathBuf,
+}
+
+#[derive(Args)]
 struct RuntimeInspectArgs {
     path: PathBuf,
     #[arg(long)]
@@ -173,6 +182,7 @@ fn main() -> ExitCode {
         Commands::List(a) => cmd_list(&a),
         Commands::Extract(a) => cmd_extract(&a),
         Commands::Create(a) => cmd_create(&a),
+        Commands::ImportGguf(a) => cmd_import_gguf(&a),
         Commands::Runtime(cmd) => match cmd {
             RuntimeCommands::Inspect(a) => cmd_runtime_inspect(&a),
             RuntimeCommands::Tensor(a) => cmd_runtime_tensor(&a),
@@ -561,6 +571,20 @@ fn cmd_create(args: &CreateArgs) -> CliResult {
         args.output.display(),
         axon_bytes.len() as f64 / 1_048_576.0,
         17
+    );
+    Ok(())
+}
+
+fn cmd_import_gguf(args: &ImportGgufArgs) -> CliResult {
+    let axon_bytes = axon_core::convert::gguf_to_axon(&args.input)
+        .map_err(|e| format!("failed to import GGUF {}: {e}", args.input.display()))?;
+    fs::write(&args.output, &axon_bytes)
+        .map_err(|e| format!("failed to write {}: {e}", args.output.display()))?;
+    println!(
+        "Imported GGUF {} -> {} ({:.2} MB)",
+        args.input.display(),
+        args.output.display(),
+        axon_bytes.len() as f64 / 1_048_576.0
     );
     Ok(())
 }
