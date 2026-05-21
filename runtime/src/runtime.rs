@@ -38,6 +38,19 @@ use crate::mmap_store::MmapStore;
 use crate::stats::RuntimeStats;
 use crate::tensor_cache::{TensorCache, CacheStats as TensorCacheStats};
 
+/// Configuration options for opening a runtime model.
+#[derive(Debug, Clone)]
+pub struct RuntimeOptions {
+    /// Optional cache budget in bytes. If 0, no caching is used.
+    pub cache_budget_bytes: usize,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self { cache_budget_bytes: 0 }
+    }
+}
+
 /// Metadata about a tensor in the model — no data loaded.
 #[derive(Debug, Clone)]
 pub struct TensorInfo {
@@ -91,6 +104,7 @@ pub trait TensorAccess {
 /// No tensor data is loaded during `open()`. Only the header (64 bytes),
 /// manifest (variable, typically a few KB), and tensor descriptor table
 /// (192 bytes per tensor) are parsed from the mmap.
+#[derive(Debug)]
 pub struct AxonRuntime {
     store: MmapStore,
     header: AxonHeader,
@@ -238,6 +252,113 @@ impl AxonRuntime {
         Ok(bytes)
     }
 
+    /// Get a zero-copy view into a tensor's data.
+    ///
+    /// Returns a `&[u8]` slice that borrows directly from the mmap.
+    /// No allocation, no copying — the OS pages in the tensor data
+    /// from disk on first access.
+    ///
+    /// The returned slice is valid as long as the runtime is alive.
+    ///
+    /// ```no_run
+    /// # use axon_runtime::AxonRuntime;
+    /// # let rt = AxonRuntime::open("model.axon").unwrap();
+    /// let view: &[u8] = rt.tensor_view("layer_0_q").unwrap();
+    /// ```
+    pub fn tensor_view(&self, name: &str) -> AxonResult<&[u8]> {
+        let desc = self.find_descriptor(name)?;
+        let slice = self.store.raw_slice(desc.data_offset, desc.data_size)
+            .ok_or_else(|| AxonError::UnexpectedEof {
+                needed: desc.data_offset + desc.data_size,
+                available: self.store.len(),
+            })?;
+        self.stats.record_access(desc.data_size);
+        Ok(slice)
+    }
+
+    /// Get a zero-copy view into a contiguous byte range of a tensor.
+    ///
+    /// No allocation, no copying. Only the requested bytes are mapped.
+    ///
+    /// ```no_run
+    /// # use axon_runtime::AxonRuntime;
+    /// # let rt = AxonRuntime::open("model.axon").unwrap();
+    /// let view: &[u8] = rt.tensor_byte_view("layer_0_q", 0..4096).unwrap();
+    /// ```
+    pub fn tensor_byte_view(&self, name: &str, range: std::ops::Range<usize>) -> AxonResult<&[u8]> {
+        let desc = self.find_descriptor(name)?;
+        let byte_offset = range.start as u64;
+        let size = (range.end - range.start) as u64;
+        if byte_offset + size > desc.data_size {
+            return Err(AxonError::UnexpectedEof {
+                needed: desc.data_offset + byte_offset + size,
+                available: desc.data_offset + desc.data_size,
+            });
+        }
+        let slice = self.store.raw_slice(desc.data_offset + byte_offset, size)
+            .ok_or_else(|| AxonError::UnexpectedEof {
+                needed: desc.data_offset + byte_offset + size,
+                available: self.store.len(),
+            })?;
+        self.stats.record_access(size);
+        Ok(slice)
+    }
+
+    /// Get a zero-copy view of contiguous rows from a 2D tensor.
+    ///
+    /// Uses the tensor's dtype and shape to compute exact byte offsets.
+    /// No allocation, no copying — only the requested rows are mapped.
+    ///
+    /// ```no_run
+    /// # use axon_runtime::AxonRuntime;
+    /// # let rt = AxonRuntime::open("model.axon").unwrap();
+    /// let rows: &[u8] = rt.tensor_rows("emb_weight", 0, 128).unwrap();
+    /// ```
+    pub fn tensor_rows(&self, name: &str, start_row: usize, end_row: usize) -> AxonResult<&[u8]> {
+        let desc = self.find_descriptor(name)?;
+        let dtype = desc.dtype()?;
+        let shape = desc.shape_vec();
+
+        if shape.len() < 2 {
+            return Err(AxonError::InvalidManifest(
+                format!("tensor_rows requires at least 2D tensor, got {}D for '{}'", shape.len(), name)
+            ));
+        }
+
+        let cols = shape[1] as usize;
+        let elem_size = dtype.size_in_bytes();
+        let row_stride = cols.checked_mul(elem_size)
+            .ok_or_else(|| AxonError::AlignmentError {
+                offset: 0,
+                alignment: 1,
+            })?;
+        let total_rows = shape[0] as usize;
+
+        if start_row >= total_rows || end_row > total_rows || start_row > end_row {
+            return Err(AxonError::UnexpectedEof {
+                needed: desc.data_offset + (end_row * row_stride) as u64,
+                available: desc.data_offset + desc.data_size,
+            });
+        }
+
+        let byte_offset = start_row.checked_mul(row_stride)
+            .ok_or_else(|| AxonError::AlignmentError { offset: 0, alignment: 1 })?;
+        let num_rows = end_row - start_row;
+        let size = num_rows.checked_mul(row_stride)
+            .ok_or_else(|| AxonError::AlignmentError { offset: 0, alignment: 1 })?;
+
+        let slice = self.store.raw_slice(
+            desc.data_offset + byte_offset as u64,
+            size as u64,
+        ).ok_or_else(|| AxonError::UnexpectedEof {
+            needed: desc.data_offset + byte_offset as u64 + size as u64,
+            available: self.store.len(),
+        })?;
+
+        self.stats.record_access(size as u64);
+        Ok(slice)
+    }
+
     /// Get runtime statistics.
     pub fn stats(&self) -> &RuntimeStats {
         &self.stats
@@ -294,6 +415,7 @@ impl TensorAccess for AxonRuntime {
 /// let mut rt = AxonRuntime::with_cache("model.axon", 4 * 1024 * 1024 * 1024).unwrap();
 /// let data = rt.tensor_cached("layer_0_q").unwrap();
 /// ```
+#[derive(Debug)]
 pub struct CachedRuntime {
     pub(crate) inner: AxonRuntime,
     pub(crate) cache: TensorCache,
@@ -459,6 +581,162 @@ mod tests {
         assert_eq!(data.len(), 64);
         assert_eq!(data[0], (5 * 64) as u8);
         assert_eq!(data[63], (5 * 64 + 63) as u8);
+    }
+
+    #[test]
+    fn test_tensor_view_zero_copy() {
+        let path = test_dir().join("test_view.axon");
+        build_test_axon(&path);
+
+        let rt = AxonRuntime::open(&path).expect("Failed to open runtime");
+
+        // Zero-copy borrowed view — must point to valid data
+        let view: &[u8] = rt.tensor_view("layer_0_weight")
+            .expect("Failed to get tensor view");
+        assert_eq!(view.len(), 64);
+        assert_eq!(view[0], 0u8);
+        assert_eq!(view[63], 63u8);
+    }
+
+    #[test]
+    fn test_tensor_byte_view_zero_copy() {
+        let path = test_dir().join("test_byte_view.axon");
+        build_test_axon(&path);
+
+        let rt = AxonRuntime::open(&path).expect("Failed to open runtime");
+
+        // Zero-copy byte-range view
+        let view: &[u8] = rt.tensor_byte_view("layer_0_weight", 16..32)
+            .expect("Failed to get byte view");
+        assert_eq!(view.len(), 16);
+        assert_eq!(view[0], 16u8);
+        assert_eq!(view[15], 31u8);
+    }
+
+    #[test]
+    fn test_tensor_view_lifetime() {
+        let path = test_dir().join("test_view_lifetime.axon");
+        build_test_axon(&path);
+
+        let rt = AxonRuntime::open(&path).expect("Failed to open runtime");
+
+        // The view borrows from rt — the borrow checker enforces this.
+        // This test verifies the view is valid while rt exists.
+        let view = rt.tensor_view("layer_0_weight").unwrap();
+        let first_byte = view[0];
+        assert_eq!(first_byte, 0u8);
+        // view is dropped before rt (or with rt) — safety guaranteed by Rust's borrow checker.
+    }
+
+    #[test]
+    fn test_tensor_view_invalid_name() {
+        let path = test_dir().join("test_view_invalid.axon");
+        build_test_axon(&path);
+
+        let rt = AxonRuntime::open(&path).expect("Failed to open runtime");
+        let result = rt.tensor_view("nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tensor_view_invalid_range() {
+        let path = test_dir().join("test_view_range.axon");
+        build_test_axon(&path);
+
+        let rt = AxonRuntime::open(&path).expect("Failed to open runtime");
+        let result = rt.tensor_byte_view("layer_0_weight", 0..999);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tensor_rows_2d() {
+        use std::fs;
+        use axon_core::AxonBuilder;
+        use axon_core::DType;
+
+        // Build a 2D tensor: 16 rows x 8 cols, U8
+        let data: Vec<u8> = (0..128).map(|i| i as u8).collect();
+        let path = test_dir().join("test_rows_2d.axon");
+        let axon = AxonBuilder::new()
+            .add_tensor("mat", data.clone(), DType::U8, &[16, 8])
+            .build()
+            .unwrap();
+        fs::write(&path, &axon).unwrap();
+
+        let rt = AxonRuntime::open(&path).unwrap();
+
+        // First 4 rows (0..4)
+        let rows = rt.tensor_rows("mat", 0, 4).unwrap();
+        assert_eq!(rows.len(), 4 * 8); // 4 rows x 8 cols
+        assert_eq!(rows[0], 0);
+        assert_eq!(rows[31], 31);
+
+        // Middle rows (4..8)
+        let rows = rt.tensor_rows("mat", 4, 8).unwrap();
+        assert_eq!(rows.len(), 4 * 8);
+        assert_eq!(rows[0], 32);
+        assert_eq!(rows[31], 63);
+
+        // Last rows (12..16)
+        let rows = rt.tensor_rows("mat", 12, 16).unwrap();
+        assert_eq!(rows.len(), 4 * 8);
+        assert_eq!(rows[0], 96);
+        assert_eq!(rows[31], 127);
+
+        // Full tensor via rows
+        let rows = rt.tensor_rows("mat", 0, 16).unwrap();
+        let full = rt.tensor("mat").unwrap();
+        assert_eq!(rows, &full[..]);
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_tensor_rows_invalid_range() {
+        use std::fs;
+        use axon_core::AxonBuilder;
+        use axon_core::DType;
+
+        let data = vec![0u8; 64];
+        let path = test_dir().join("test_rows_invalid.axon");
+        let axon = AxonBuilder::new()
+            .add_tensor("mat", data, DType::U8, &[8, 8])
+            .build()
+            .unwrap();
+        fs::write(&path, &axon).unwrap();
+
+        let rt = AxonRuntime::open(&path).unwrap();
+
+        // start_row >= total_rows
+        assert!(rt.tensor_rows("mat", 10, 12).is_err());
+
+        // end_row > total_rows
+        assert!(rt.tensor_rows("mat", 0, 20).is_err());
+
+        // start_row > end_row
+        assert!(rt.tensor_rows("mat", 5, 3).is_err());
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_tensor_rows_on_1d_fails() {
+        use std::fs;
+        use axon_core::AxonBuilder;
+        use axon_core::DType;
+
+        let data = vec![0u8; 64];
+        let path = test_dir().join("test_rows_1d.axon");
+        let axon = AxonBuilder::new()
+            .add_tensor("vec", data, DType::U8, &[64])
+            .build()
+            .unwrap();
+        fs::write(&path, &axon).unwrap();
+
+        let rt = AxonRuntime::open(&path).unwrap();
+        assert!(rt.tensor_rows("vec", 0, 10).is_err());
+
+        fs::remove_file(&path).ok();
     }
 
     #[test]

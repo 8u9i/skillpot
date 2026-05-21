@@ -19,9 +19,21 @@
 //!
 //! ## Extension points
 //!
+//! - `TensorPager` trait: pluggable page sources (mmap, network, compressed)
 //! - `PagePolicy`: pluggable eviction strategies (LRU, LFU, custom)
 //! - `PrefetchStrategy`: predictive loading (sequential, layer-aware, ML-guided)
-//! - `PageSource`: support for alternative backing stores (network, compressed)
+//!
+//! ## Future architecture
+//!
+//! ```text
+//! SSD stores full model weights
+//! RAM acts as page cache
+//! TensorPager loads pages on demand
+//! Prefetcher predicts next tensor access
+//! Eviction removes cold pages
+//! ```
+//!
+//! This is the long-term path toward running models larger than available RAM.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -29,6 +41,28 @@ use std::sync::Arc;
 use axon_core::{AxonError, AxonResult, DType};
 
 use crate::runtime::{AxonRuntime, TensorInfo};
+
+/// Trait for page-level tensor access.
+///
+/// Implementations can back pages from different sources:
+/// - mmap'd file (default)
+/// - compressed archive
+/// - networked storage
+/// - distributed shards
+///
+/// Each implementation handles its own eviction and prefetching.
+pub trait TensorPager {
+    /// Get a page of tensor data starting at `byte_offset` with length `len`.
+    /// Returns a borrowed slice. The implementation decides whether to cache
+    /// or read fresh from the backing store.
+    fn get_page(&self, tensor: &str, byte_offset: usize, len: usize) -> AxonResult<&[u8]>;
+
+    /// Hint to prefetch a page range into local cache.
+    fn prefetch(&self, tensor: &str, byte_offset: usize, len: usize) -> AxonResult<()>;
+
+    /// Hint to evict a tensor's pages from local cache.
+    fn evict(&self, tensor: &str) -> AxonResult<()>;
+}
 
 /// Default page size: 4MB. This is large enough to amortize SSD access
 /// latency (~10µs) but small enough to keep granularity reasonable.

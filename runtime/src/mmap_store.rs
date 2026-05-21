@@ -28,6 +28,7 @@ use axon_core::{AxonError, AxonResult};
 /// The entire file is mapped with `MAP_PRIVATE | PROT_READ`. The OS manages
 /// which pages are resident in RAM — only the byte ranges you actually read
 /// are faulted in from disk.
+#[derive(Debug)]
 pub struct MmapStore {
     mmap: Mmap,
     len: u64,
@@ -79,9 +80,11 @@ impl MmapStore {
 
     /// Get a raw byte slice into the mmap.
     ///
-    /// This is zero-copy but the returned slice borrows from the mmap.
-    /// It must not outlive this store. Crate-internal only.
-    pub(crate) fn raw_slice(&self, offset: u64, size: u64) -> Option<&[u8]> {
+    /// This is zero-copy — the returned slice borrows from the mmap.
+    /// The caller must ensure the slice does not outlive this store.
+    ///
+    /// The returned lifetime `'a` is tied to the store's borrow `&'a self`.
+    pub fn raw_slice(&self, offset: u64, size: u64) -> Option<&[u8]> {
         self.validate_range(offset, size).ok()?;
         let start = offset as usize;
         let end = start + size as usize;

@@ -91,6 +91,7 @@ impl CacheStats {
 /// // Unpin
 /// cache.unpin("layer_0_q");
 /// ```
+#[derive(Debug)]
 pub struct TensorCache {
     /// The LRU cache. Stores `Arc<Vec<u8>>` so cache hits are reference-count ops.
     inner: LruCache<String, Arc<Vec<u8>>>,

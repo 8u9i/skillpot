@@ -18,16 +18,18 @@
 
 **.axon** is a binary model-weight container and runtime loader for AI models. It helps
 memory-limited machines — laptops, edge devices, home AI servers — load and run large
-models more efficiently by using memory mapping, partial tensor loading, and
+models more efficiently by using memory mapping, partial tensor access, and
 SSD-backed caching.
 
 ## What Axon Does
 
+- **Zero-copy tensor views via mmap** — `tensor_view()` returns a `&[u8]` slice
+  directly into the memory-mapped file. No allocation, no copying. The OS pages
+  in tensor data from disk on first access.
 - **Fast model opening** — parse header + manifest + tensor index in ~30µs, regardless
   of file size
-- **Memory-mapped tensor access** — tensor bytes are faulted in from disk on demand,
-  not eagerly loaded
 - **Partial tensor loading** — load only the rows or byte range you need
+- **SSD-backed execution** — keep model weights on SSD, cache only active tensors in RAM
 - **SSD-backed execution** — keep model weights on SSD, cache only active tensors in RAM
 - **LoRA adapter side-loading** — fast adapter switching without loading full models
 - **Tensor cache management** — LRU eviction, pinning, memory budget control
@@ -35,16 +37,28 @@ SSD-backed caching.
 
 ## What Axon Is Not
 
-Axon is **not** a training accelerator. Training speed depends on GPU compute, memory
-bandwidth, optimizer operations, and matrix multiplication. Axon focuses on the
-**storage and loading side** of model execution:
+Axon does **not** accelerate neural network training compute. Training speed depends
+on GPU compute, memory bandwidth, optimizer operations, and matrix multiplication.
+Axon improves:
 
-- Faster startup
-- Lower memory overhead
-- Partial tensor access
-- SSD-backed model execution
-- LoRA adapter switching
-- Large-model usage on memory-limited machines
+- Model loading and startup latency
+- Memory usage through lazy mmap and partial access
+- Tensor access through zero-copy views
+- Runtime deployment through caching and patching
+- Inference startup latency on memory-constrained hardware
+
+The primary Axon value proposition:
+
+> Axon provides safe, mmap-backed, low-memory, partial-access tensor loading for runtime inference workloads.
+
+Target environments:
+
+- Laptops
+- Mini PCs
+- Jetson and edge AI devices
+- Raspberry Pi-class systems
+- Local AI inference servers
+- Memory-constrained deployments
 
 ## Quick Start
 
@@ -66,11 +80,15 @@ cargo build --release
 use axon_runtime::AxonRuntime;
 
 let rt = AxonRuntime::open("model.axon")?;
-println!("Model: {} ({} tensors)", rt.model_name(), rt.tensor_count());
 
-// Tensor data is loaded lazily from the mmap — only the bytes you
-// touch are faulted in from disk
-let data = rt.tensor("emb_weight")?;
+// Zero-copy view — no allocation, no copying, direct mmap slice
+let view: &[u8] = rt.tensor_view("emb_weight")?;
+
+// Shape-aware row slicing — maps only the requested rows
+let rows: &[u8] = rt.tensor_rows("emb_weight", 0, 128)?;
+
+// Owned copy (outlives the runtime)
+let data: Vec<u8> = rt.tensor("emb_weight")?;
 ```
 
 ## Performance
