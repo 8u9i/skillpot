@@ -1,0 +1,16 @@
+[package]
+name = "axon-ffi"
+description = "C FFI bindings for the axon-core library"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+axon-core = { path = "../core", features = ["mmap"] }
+libc = "0.2"
+
+[lib]
+name = "axon_ffi"
+path = "src/lib.rs"
+crate-type = ["cdylib", "staticlib"]

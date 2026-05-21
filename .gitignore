@@ -1,0 +1,9 @@
+/target/
+/output/
+__pycache__/
+*.pyc
+*.so
+*.dylib
+*.dll
+*.exe
+examples/cffi_example

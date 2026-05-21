@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "cli",
+    "ffi",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+authors = ["Axon Project"]
+license = "MIT"
