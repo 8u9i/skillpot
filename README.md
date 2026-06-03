@@ -14,4 +14,4 @@ It treats the target model as frozen and improves a deployable skill document th
 
 The implementation lives in [`skillopt/`](skillopt/). See [`skillopt/README.md`](skillopt/README.md) for usage examples and the optimizer adapter contract.
 
-The file `Adobe Express - file.png` is preserved from the original repository cleanup request.
+
